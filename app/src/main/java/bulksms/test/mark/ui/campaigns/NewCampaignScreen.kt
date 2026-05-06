@@ -15,16 +15,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -162,22 +163,22 @@ fun NewCampaignScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GroupPicker(state: NewCampaignState, vm: NewCampaignViewModel) {
     var expanded by remember { mutableStateOf(false) }
     val selected = state.groups.firstOrNull { it.id == state.selectedGroupId }
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
-        OutlinedTextField(
-            value = selected?.let { "${it.name} · ${it.contactCount} contacts" } ?: "Pick a group",
-            onValueChange = {},
-            readOnly = true,
-            modifier = Modifier.fillMaxWidth().menuAnchor(),
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) }
-        )
-        androidx.compose.material3.ExposedDropdownMenu(
-            expanded = expanded, onDismissRequest = { expanded = false }
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
         ) {
+            Text(
+                selected?.let { "${it.name} · ${it.contactCount} contacts" } ?: "Pick a group",
+                modifier = Modifier.weight(1f)
+            )
+            Icon(Icons.Outlined.ArrowDropDown, null)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             state.groups.forEach { g ->
                 DropdownMenuItem(
                     text = { Text("${g.name} · ${g.contactCount} contacts") },
@@ -222,22 +223,22 @@ private fun EncodingRow(seg: SegmentCounter.Result) {
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SimPicker(state: NewCampaignState, vm: NewCampaignViewModel) {
     var expanded by remember { mutableStateOf(false) }
     val selected = state.sims.firstOrNull { it.subscriptionId == state.selectedSubId }
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
-        OutlinedTextField(
-            value = selected?.label ?: "Pick a SIM",
-            onValueChange = {},
-            readOnly = true,
-            modifier = Modifier.fillMaxWidth().menuAnchor(),
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) }
-        )
-        androidx.compose.material3.ExposedDropdownMenu(
-            expanded = expanded, onDismissRequest = { expanded = false }
+    Box(Modifier.fillMaxWidth()) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
         ) {
+            Text(
+                selected?.label ?: "Pick a SIM",
+                modifier = Modifier.weight(1f)
+            )
+            Icon(Icons.Outlined.ArrowDropDown, null)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             state.sims.forEach { sim ->
                 DropdownMenuItem(
                     text = { Text(sim.label) },
