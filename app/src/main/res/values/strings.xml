@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Bulk SMS Kemer</string>
+
+    <!-- Permission screen -->
+    <string name="perm_title">Permissions required</string>
+    <string name="perm_intro">Bulk SMS Kemer needs the following permissions to send messages reliably.</string>
+    <string name="perm_send_sms_label">Send SMS</string>
+    <string name="perm_send_sms_desc">Required to dispatch messages through your SIM.</string>
+    <string name="perm_phone_state_label">Phone state</string>
+    <string name="perm_phone_state_desc">Required to detect SIMs and pause during calls.</string>
+    <string name="perm_notifications_label">Notifications</string>
+    <string name="perm_notifications_desc">Required for the foreground service to keep running.</string>
+    <string name="perm_battery_label">Ignore battery optimization</string>
+    <string name="perm_battery_desc">Required so the system does not kill the sender during long campaigns.</string>
+    <string name="perm_grant">Grant</string>
+    <string name="perm_granted">Granted</string>
+    <string name="perm_continue">Continue</string>
+
+    <!-- Bottom nav -->
+    <string name="nav_campaigns">Campaigns</string>
+    <string name="nav_contacts">Contacts</string>
+    <string name="nav_templates">Templates</string>
+    <string name="nav_sent">Sent</string>
+
+    <!-- Notification channels -->
+    <string name="channel_progress_name">Campaign progress</string>
+    <string name="channel_progress_desc">Persistent notification while a campaign is sending.</string>
+    <string name="channel_alerts_name">Campaign alerts</string>
+    <string name="channel_alerts_desc">Important campaign events: paused, completed, errors.</string>
+
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_open">Open</string>
+</resources>
