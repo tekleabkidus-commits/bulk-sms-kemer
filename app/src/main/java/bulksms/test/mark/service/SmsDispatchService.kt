@@ -1,12 +1,10 @@
 package bulksms.test.mark.service
 
-import android.Manifest
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -63,10 +61,6 @@ class SmsDispatchService : Service() {
     private lateinit var callMonitor: CallStateMonitor
     private lateinit var simMonitor: SimChangeMonitor
     private lateinit var thermalMonitor: ThermalMonitor
-
-    private var consecutiveFailures = 0
-    private var consecutiveGenericFailures = 0
-    private val sentRateWindow = ArrayDeque<Long>()  // timestamps of recent SENTs for rate calc
 
     override fun onCreate() {
         super.onCreate()
@@ -128,6 +122,10 @@ class SmsDispatchService : Service() {
 
     private suspend fun runLoop() {
         try {
+            // Reset failure trackers at the start of each run
+            failureStreak = 0
+            genericFailureStreak = 0
+
             while (scope.isActive) {
                 val campaign = app.campaignRepo.getCampaign(campaignId) ?: break
                 if (campaign.status != CampaignStatus.RUNNING) break
@@ -137,48 +135,55 @@ class SmsDispatchService : Service() {
                     return
                 }
 
-                val recipient = app.campaignRepo.nextEligible(campaignId)
-                if (recipient == null) {
-                    val nextRetryAt = app.campaignRepo.nextRetryTime(campaignId)
-                    if (nextRetryAt == null) {
-                        // Nothing pending and no retries — done.
-                        completeAndStop(campaign)
-                        return
-                    }
-                    val waitMs = (nextRetryAt - System.currentTimeMillis()).coerceAtLeast(1_000L).coerceAtMost(60_000L)
-                    delay(waitMs)
-                    continue
+                // Reconcile any in-flight messages whose result broadcast didn't come back
+                // within the window. The SMS has been handed to the radio at that point;
+                // we treat lost broadcasts as "sent" (with a Stale-recovered note) rather
+                // than blocking the dispatcher waiting on them.
+                val now0 = System.currentTimeMillis()
+                app.database.recipientDao().recoverStaleSending(now0, now0 - STALE_SENDING_CUTOFF_MS)
+
+                // Instability / balance pause checks (counters maintained by SmsResultReceiver)
+                if (genericFailureStreak >= 5) {
+                    pauseAndStop(campaign, PauseReason.BALANCE_SUSPECTED, "5 consecutive failures")
+                    return
                 }
-
-                val rateNow = currentRatePerMin()
-                updateProgressNotification(campaign, sentCountFresh(), rateNow)
-
-                val sendOk = sendOneAndWait(campaign, recipient)
-                if (sendOk) {
-                    consecutiveFailures = 0
-                    consecutiveGenericFailures = 0
-                    val now = System.currentTimeMillis()
-                    sentRateWindow.addLast(now)
-                    while (sentRateWindow.isNotEmpty() && now - sentRateWindow.first() > 60_000L) {
-                        sentRateWindow.removeFirst()
-                    }
-                } else {
-                    consecutiveFailures++
-                    // BALANCE_SUSPECTED tracking happens in sendOneAndWait when the receiver
-                    // wrote a GENERIC_FAILURE result code.
-                }
-
-                checkInstabilityPauseTriggers(campaign)?.let { reason ->
-                    pauseAndStop(campaign, reason.first, reason.second)
+                if (failureStreak >= 3) {
+                    pauseAndStop(campaign, PauseReason.INSTABILITY, "3 consecutive failures")
                     return
                 }
 
-                // Throttle delay
-                val waitMs = computeThrottle(campaign)
-                delay(waitMs)
+                val recipient = app.campaignRepo.nextEligible(campaignId)
+                if (recipient == null) {
+                    val nextRetryAt = app.campaignRepo.nextRetryTime(campaignId)
+                    val pending = app.campaignRepo.pendingCount(campaignId)
+                    if (nextRetryAt == null && pending == 0) {
+                        // Nothing pending and no retries — but check that nothing is still
+                        // in SENDING state (a broadcast might still be on the wire).
+                        val stillSending = app.database.recipientDao().sendingCount(campaignId)
+                        if (stillSending == 0) {
+                            completeAndStop(campaign)
+                            return
+                        }
+                        delay(1_000L)
+                        continue
+                    }
+                    val sleep = if (nextRetryAt != null) {
+                        (nextRetryAt - System.currentTimeMillis()).coerceAtLeast(500L).coerceAtMost(60_000L)
+                    } else 1_000L
+                    delay(sleep)
+                    continue
+                }
+
+                updateProgressNotification(campaign, sentCountFresh(), currentRatePerMin())
+
+                // Fire-and-forget: don't block on the result broadcast. The receiver
+                // updates the recipient row + the failure counters asynchronously.
+                fireSend(campaign, recipient)
+
+                // Throttle delay paces the loop; the broadcast latency does NOT.
+                delay(computeThrottle(campaign))
             }
         } catch (t: Throwable) {
-            // Unexpected — pause for safety.
             try {
                 app.campaignRepo.pause(campaignId, PauseReason.USER, "Service error: ${t.javaClass.simpleName}")
             } catch (_: Throwable) {}
@@ -218,24 +223,20 @@ class SmsDispatchService : Service() {
         return null
     }
 
-    private fun checkInstabilityPauseTriggers(@Suppress("UNUSED_PARAMETER") campaign: Campaign): Pair<PauseReason, String?>? {
-        if (consecutiveGenericFailures >= 5) return PauseReason.BALANCE_SUSPECTED to "5 consecutive failures"
-        if (consecutiveFailures >= 3) return PauseReason.INSTABILITY to "3 consecutive failures"
-        return null
-    }
-
     /**
-     * Sends one recipient and waits for the SENT broadcast (or 30s timeout) to update DB.
-     * Returns true if the SENT broadcast came back as RESULT_OK.
+     * Fire-and-forget send. The dispatcher does NOT wait for the SENT broadcast — that
+     * comes back asynchronously and SmsResultReceiver writes the result to the DB and
+     * updates the failure-streak counter. This is the key to honoring the throttle setting
+     * accurately: with a 1s throttle the loop runs once per second regardless of how
+     * long the carrier takes to send a result broadcast back (which on Ethio's network
+     * can be 3-10 seconds per message).
      */
-    private suspend fun sendOneAndWait(campaign: Campaign, recipient: Recipient): Boolean {
-        // Rendered message is constant across all recipients in this app (no merge fields).
+    private suspend fun fireSend(campaign: Campaign, recipient: Recipient) {
         val text = campaign.message
         val smsManager = getSmsManager(campaign.simSubscriptionId)
         val parts = try {
             smsManager.divideMessage(text)
         } catch (_: Throwable) {
-            // Fallback if divideMessage fails for any reason
             arrayListOf(text)
         }
         val totalParts = parts.size
@@ -261,49 +262,14 @@ class SmsDispatchService : Service() {
                 deliveredIntents
             )
         } catch (t: Throwable) {
+            // Synchronous failure — never reaches the radio. Count it locally.
             val msg = "send error: ${t.javaClass.simpleName}: ${t.message ?: ""}".take(160)
             if (current >= CampaignRepository.MAX_ATTEMPTS) {
                 app.campaignRepo.markFailed(recipient.id, msg, null)
             } else {
                 app.campaignRepo.markRetryLater(recipient.id, current, msg, null)
             }
-            consecutiveGenericFailures++
-            return false
-        }
-
-        // Poll the DB for THIS recipient's status to change from SENDING. This is robust
-        // against late broadcasts from earlier messages (which used to incorrectly wake a
-        // shared deferred and cause spurious "consecutive failure" pauses).
-        val deadline = System.currentTimeMillis() + RESULT_WAIT_MS
-        var updated: bulksms.test.mark.data.entity.Recipient? = null
-        while (System.currentTimeMillis() < deadline) {
-            val r = app.database.recipientDao().getById(recipient.id) ?: return false
-            if (r.status != bulksms.test.mark.data.entity.RecipientStatus.SENDING) {
-                updated = r
-                break
-            }
-            delay(200L)
-        }
-
-        // No broadcast within window. The SMS has been handed to the radio at this point;
-        // on a backed-up carrier the result broadcast can lag, but that is not a failure.
-        // Mark the recipient as SENT with a "Stale" note so it's visible in the report.
-        if (updated == null) {
-            app.database.recipientDao().markSent(recipient.id, System.currentTimeMillis(), 0)
-            return true
-        }
-
-        return when (updated.status) {
-            bulksms.test.mark.data.entity.RecipientStatus.SENT,
-            bulksms.test.mark.data.entity.RecipientStatus.DELIVERED -> true
-            bulksms.test.mark.data.entity.RecipientStatus.FAILED,
-            bulksms.test.mark.data.entity.RecipientStatus.PENDING -> {
-                if (updated.smsResultCode == SmsManager.RESULT_ERROR_GENERIC_FAILURE) {
-                    consecutiveGenericFailures++
-                }
-                false
-            }
-            else -> false
+            recordFailure(isGeneric = false)
         }
     }
 
@@ -330,7 +296,17 @@ class SmsDispatchService : Service() {
         } catch (_: Throwable) { 0 }
     }
 
-    private fun currentRatePerMin(): Int = sentRateWindow.size
+    private fun currentRatePerMin(): Int {
+        // Count rows whose sentAt is within the last minute. Cheap indexed query.
+        return try {
+            val cutoff = System.currentTimeMillis() - 60_000L
+            val cur = app.database.openHelper.readableDatabase.query(
+                "SELECT COUNT(*) FROM recipients WHERE campaignId = ? AND sentAt IS NOT NULL AND sentAt >= ?",
+                arrayOf(campaignId.toString(), cutoff.toString())
+            )
+            cur.use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+        } catch (_: Throwable) { 0 }
+    }
 
     // --------------------------- PendingIntents ---------------------------
 
@@ -501,10 +477,26 @@ class SmsDispatchService : Service() {
 
         const val WAKELOCK_TIMEOUT_MS: Long = 12L * 3600 * 1000  // 12 hours
         const val MIN_THROTTLE_MS: Long = 500
-        const val RESULT_WAIT_MS: Long = 30_000
+        const val STALE_SENDING_CUTOFF_MS: Long = 60_000  // 60s — broadcast presumed lost
 
         @Volatile var isRunning: Boolean = false
             private set
+
+        // --- Failure-streak counters (updated by SmsResultReceiver, read by the loop) ---
+        @Volatile var failureStreak: Int = 0
+        @Volatile var genericFailureStreak: Int = 0
+
+        /** Called by SmsResultReceiver on a successful (RESULT_OK on last part) send. */
+        fun recordSuccess() {
+            failureStreak = 0
+            genericFailureStreak = 0
+        }
+
+        /** Called by SmsResultReceiver on a failed send. */
+        fun recordFailure(isGeneric: Boolean) {
+            failureStreak++
+            if (isGeneric) genericFailureStreak++
+        }
 
         fun requestStop(context: Context) {
             try {

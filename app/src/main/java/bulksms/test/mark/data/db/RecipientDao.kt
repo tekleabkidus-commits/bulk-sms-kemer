@@ -135,6 +135,9 @@ interface RecipientDao {
     @Query("SELECT COUNT(*) FROM recipients WHERE campaignId = :id AND status = 'PENDING'")
     suspend fun pendingCount(id: Long): Int
 
+    @Query("SELECT COUNT(*) FROM recipients WHERE campaignId = :id AND status = 'SENDING'")
+    suspend fun sendingCount(id: Long): Int
+
     /** Reset any SENDING rows back to PENDING for clean dispatch resume (called rarely). */
     @Query("UPDATE recipients SET status = 'PENDING' WHERE campaignId = :id AND status = 'SENDING'")
     suspend fun resetSending(id: Long)

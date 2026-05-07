@@ -46,14 +46,24 @@ class SmsResultReceiver : BroadcastReceiver() {
         code: Int,
         isLastPart: Boolean
     ) {
-        // For non-OK results we can finalize early (any failed segment fails the whole message).
+        // Idempotency: only act if this recipient is still in SENDING state. If a
+        // previous broadcast (e.g., an earlier part that failed) already finalized this
+        // recipient, ignore subsequent broadcasts so we don't double-count.
+        val current = app.database.recipientDao().getById(recipientId) ?: return
+        if (current.status != bulksms.test.mark.data.entity.RecipientStatus.SENDING) return
+
         if (code != Activity.RESULT_OK) {
+            // Any failed segment fails the whole message.
             finalizeFailure(app.campaignRepo, recipientId, attemptNumber, code)
+            SmsDispatchService.recordFailure(
+                isGeneric = code == SmsManager.RESULT_ERROR_GENERIC_FAILURE
+            )
             return
         }
-        // RESULT_OK: only finalize on last part. Earlier parts are no-op.
+        // RESULT_OK: only finalize on the last part. Earlier parts are no-op (status stays SENDING).
         if (isLastPart) {
             app.campaignRepo.markSent(recipientId, code)
+            SmsDispatchService.recordSuccess()
         }
     }
 
