@@ -33,8 +33,6 @@ class SmsResultReceiver : BroadcastReceiver() {
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 handle(app, recipientId, attemptNumber, code, isLastPart)
-                // Wake the dispatcher in case it was idle waiting for this result.
-                SmsDispatchService.signalResult()
             } finally {
                 pending.finish()
             }

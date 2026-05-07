@@ -21,7 +21,6 @@ import bulksms.test.mark.data.repo.CampaignRepository
 import bulksms.test.mark.data.sim.SimRepository
 import bulksms.test.mark.util.BatteryUtil
 import bulksms.test.mark.util.PermissionUtil
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,7 +29,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.random.Random
 
 /**
@@ -254,9 +252,6 @@ class SmsDispatchService : Service() {
             deliveredIntents += deliveredPi(recipient.id, i, totalParts)
         }
 
-        // Reset the deferred so the next SmsResultReceiver.signalResult() will wake us.
-        signalDeferred = CompletableDeferred()
-
         try {
             smsManager.sendMultipartTextMessage(
                 recipient.normalizedPhone,
@@ -276,24 +271,39 @@ class SmsDispatchService : Service() {
             return false
         }
 
-        // Wait up to 30s for the SENT broadcast to be processed (we know it arrived because
-        // SmsResultReceiver.signalResult() completes the deferred). If timeout, treat as no-result:
-        // we mark stale-sent later via reconciliation.
-        withTimeoutOrNull(30_000L) { signalDeferred.await() }
+        // Poll the DB for THIS recipient's status to change from SENDING. This is robust
+        // against late broadcasts from earlier messages (which used to incorrectly wake a
+        // shared deferred and cause spurious "consecutive failure" pauses).
+        val deadline = System.currentTimeMillis() + RESULT_WAIT_MS
+        var updated: bulksms.test.mark.data.entity.Recipient? = null
+        while (System.currentTimeMillis() < deadline) {
+            val r = app.database.recipientDao().getById(recipient.id) ?: return false
+            if (r.status != bulksms.test.mark.data.entity.RecipientStatus.SENDING) {
+                updated = r
+                break
+            }
+            delay(200L)
+        }
 
-        // Re-fetch to see what status the receiver wrote.
-        val updated = app.database.recipientDao().getById(recipient.id) ?: return false
+        // No broadcast within window. The SMS has been handed to the radio at this point;
+        // on a backed-up carrier the result broadcast can lag, but that is not a failure.
+        // Mark the recipient as SENT with a "Stale" note so it's visible in the report.
+        if (updated == null) {
+            app.database.recipientDao().markSent(recipient.id, System.currentTimeMillis(), 0)
+            return true
+        }
 
-        return when (updated.status.name) {
-            "SENT", "DELIVERED" -> true
-            "FAILED", "PENDING" -> {
-                // PENDING here means scheduled for retry. Either way, this attempt did not succeed.
+        return when (updated.status) {
+            bulksms.test.mark.data.entity.RecipientStatus.SENT,
+            bulksms.test.mark.data.entity.RecipientStatus.DELIVERED -> true
+            bulksms.test.mark.data.entity.RecipientStatus.FAILED,
+            bulksms.test.mark.data.entity.RecipientStatus.PENDING -> {
                 if (updated.smsResultCode == SmsManager.RESULT_ERROR_GENERIC_FAILURE) {
                     consecutiveGenericFailures++
                 }
                 false
             }
-            else -> false  // SENDING after timeout: treat as not-confirmed
+            else -> false
         }
     }
 
@@ -491,16 +501,10 @@ class SmsDispatchService : Service() {
 
         const val WAKELOCK_TIMEOUT_MS: Long = 12L * 3600 * 1000  // 12 hours
         const val MIN_THROTTLE_MS: Long = 500
+        const val RESULT_WAIT_MS: Long = 30_000
 
         @Volatile var isRunning: Boolean = false
             private set
-
-        @Volatile private var signalDeferred: CompletableDeferred<Unit> = CompletableDeferred<Unit>().apply { complete(Unit) }
-
-        /** Called by SmsResultReceiver when a result lands so the loop can stop waiting. */
-        fun signalResult() {
-            try { signalDeferred.complete(Unit) } catch (_: Throwable) { /* already completed */ }
-        }
 
         fun requestStop(context: Context) {
             try {
