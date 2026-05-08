@@ -29,14 +29,34 @@ data class NewCampaignState(
     val selectedSubId: Int? = null,
     val throttleMs: Long = 1_000L,
     val jitter: Boolean = false,
+    val startRow: Int = 1,            // 1-based inclusive
+    val endRow: Int? = null,          // 1-based inclusive; null = group end
     val anotherCampaignActive: Boolean = false,
     val activeCampaignId: Long? = null,
     val starting: Boolean = false,
     val errorText: String? = null
 ) {
+    /** Number of recipients that will actually be sent given the current range. */
+    val recipientsInRange: Int
+        get() {
+            val group = groups.firstOrNull { it.id == selectedGroupId } ?: return 0
+            val total = group.contactCount
+            if (total == 0) return 0
+            val s = startRow.coerceIn(1, total)
+            val e = (endRow ?: total).coerceIn(s, total)
+            return e - s + 1
+        }
+
+    val rangeIsCustom: Boolean
+        get() {
+            val group = groups.firstOrNull { it.id == selectedGroupId } ?: return false
+            return startRow != 1 || (endRow != null && endRow != group.contactCount)
+        }
+
     val isReady: Boolean
         get() = name.isNotBlank() && message.isNotBlank() &&
-            selectedGroupId != null && selectedSubId != null && !anotherCampaignActive
+            selectedGroupId != null && selectedSubId != null && !anotherCampaignActive &&
+            recipientsInRange > 0
 }
 
 class NewCampaignViewModel(app: Application) : AndroidViewModel(app) {
@@ -76,8 +96,29 @@ class NewCampaignViewModel(app: Application) : AndroidViewModel(app) {
         val g = _state.value.groups.firstOrNull { it.id == id }
         _state.value = _state.value.copy(
             selectedGroupId = id,
+            // Reset range to full when switching groups
+            startRow = 1,
+            endRow = null,
             name = if (_state.value.name.isBlank() && g != null) defaultCampaignName(g.name) else _state.value.name
         )
+    }
+    fun setStartRow(value: Int) {
+        val total = _state.value.groups.firstOrNull { it.id == _state.value.selectedGroupId }?.contactCount ?: 0
+        val clamped = if (total == 0) 1 else value.coerceIn(1, total)
+        _state.value = _state.value.copy(startRow = clamped)
+    }
+    fun setEndRow(value: Int?) {
+        if (value == null) {
+            _state.value = _state.value.copy(endRow = null)
+            return
+        }
+        val total = _state.value.groups.firstOrNull { it.id == _state.value.selectedGroupId }?.contactCount ?: 0
+        val s = _state.value.startRow
+        val clamped = if (total == 0) s else value.coerceIn(s, total)
+        _state.value = _state.value.copy(endRow = clamped)
+    }
+    fun resetRange() {
+        _state.value = _state.value.copy(startRow = 1, endRow = null)
     }
     fun setTemplate(t: MessageTemplate) {
         _state.value = _state.value.copy(selectedTemplateId = t.id, message = t.content)
@@ -132,7 +173,9 @@ class NewCampaignViewModel(app: Application) : AndroidViewModel(app) {
                 simDisplayLabel = sim.label,
                 throttleMillis = s.throttleMs,
                 jitterEnabled = s.jitter,
-                segmentsPerMessage = segmentsPerMessage()
+                segmentsPerMessage = segmentsPerMessage(),
+                startRow = s.startRow,
+                endRow = s.endRow
             )
 
             val id = a.campaignRepo.createCampaign(spec)

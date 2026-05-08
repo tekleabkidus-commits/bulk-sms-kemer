@@ -30,6 +30,7 @@ fun ConfirmCampaignDialog(
     campaignName: String,
     groupName: String,
     recipients: Int,
+    rangeText: String? = null,
     simLabel: String,
     throttleMs: Long,
     jitter: Boolean,
@@ -57,6 +58,7 @@ fun ConfirmCampaignDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pair("Campaign", campaignName).let { Line(it.first, it.second) }
                 Line("Group", "$groupName · $recipients recipients")
+                rangeText?.let { Line("Range", it) }
                 Line("SIM", simLabel)
                 Line("Send rate",
                     "${"%.1f".format(throttleMs / 1000.0)} sec / SMS" + if (jitter) " (±20% jitter)" else "")

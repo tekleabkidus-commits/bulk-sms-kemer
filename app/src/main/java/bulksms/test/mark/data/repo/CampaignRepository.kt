@@ -21,7 +21,11 @@ data class NewCampaignSpec(
     val simDisplayLabel: String,
     val throttleMillis: Long,
     val jitterEnabled: Boolean,
-    val segmentsPerMessage: Int
+    val segmentsPerMessage: Int,
+    /** 1-based inclusive starting row in the contact group. Default 1 = beginning. */
+    val startRow: Int = 1,
+    /** 1-based inclusive ending row. null = send to last row. */
+    val endRow: Int? = null
 )
 
 class CampaignRepository(
@@ -37,14 +41,24 @@ class CampaignRepository(
 
     suspend fun createCampaign(spec: NewCampaignSpec): Long {
         val now = System.currentTimeMillis()
-        val contacts = contactDao.listAllInGroup(spec.groupId)
-        if (contacts.isEmpty()) error("Group is empty")
+        val allContacts = contactDao.listAllInGroup(spec.groupId)
+        if (allContacts.isEmpty()) error("Group is empty")
+
+        // Apply 1-based inclusive range. Coerce to safe bounds.
+        val startIdx = (spec.startRow.coerceAtLeast(1) - 1).coerceAtMost(allContacts.size - 1)
+        val endIdx = (spec.endRow ?: allContacts.size).coerceIn(startIdx + 1, allContacts.size)
+        val contacts = allContacts.subList(startIdx, endIdx)
+        if (contacts.isEmpty()) error("No recipients in selected range")
+
+        val rangeNote = if (spec.startRow > 1 || spec.endRow != null) {
+            " (rows ${startIdx + 1}–$endIdx of ${allContacts.size})"
+        } else ""
 
         val campaign = Campaign(
             name = spec.name.trim(),
             message = spec.message,
             groupId = spec.groupId,
-            groupName = spec.groupName,
+            groupName = spec.groupName + rangeNote,
             templateId = spec.templateId,
             simSubscriptionId = spec.simSubscriptionId,
             simDisplayLabel = spec.simDisplayLabel,
@@ -60,10 +74,12 @@ class CampaignRepository(
         return if (db != null) {
             db.withTransaction {
                 val id = campaignDao.insert(campaign)
-                val recipients = contacts.mapIndexed { idx, c ->
+                val recipients = contacts.mapIndexed { localIdx, c ->
                     Recipient(
                         campaignId = id,
-                        rowIndex = idx,
+                        // Preserve original 0-based row position so reports show the true
+                        // location in the source list, not the local slice index.
+                        rowIndex = startIdx + localIdx,
                         rawPhone = c.rawPhone,
                         normalizedPhone = c.normalizedPhone,
                         carrier = c.carrier
@@ -75,9 +91,9 @@ class CampaignRepository(
         } else {
             // Fallback (dbRef should always be attached, but keep behavior safe)
             val id = campaignDao.insert(campaign)
-            val recipients = contacts.mapIndexed { idx, c ->
+            val recipients = contacts.mapIndexed { localIdx, c ->
                 Recipient(
-                    campaignId = id, rowIndex = idx,
+                    campaignId = id, rowIndex = startIdx + localIdx,
                     rawPhone = c.rawPhone, normalizedPhone = c.normalizedPhone, carrier = c.carrier
                 )
             }

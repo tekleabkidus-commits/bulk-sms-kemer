@@ -99,6 +99,11 @@ fun NewCampaignScreen(
                 GroupPicker(state, vm)
             }
 
+            // Range picker — only useful once a group is chosen.
+            if (state.selectedGroupId != null) {
+                RangePicker(state, vm)
+            }
+
             Text("Message", style = MaterialTheme.typography.titleMedium)
             TemplatePickerRow(state, vm)
             OutlinedTextField(
@@ -142,10 +147,14 @@ fun NewCampaignScreen(
     }
 
     if (showConfirm) {
+        val groupTotal = vm.selectedGroup()?.contactCount ?: 0
         ConfirmCampaignDialog(
             campaignName = state.name,
             groupName = vm.selectedGroup()?.name ?: "",
-            recipients = vm.selectedGroup()?.contactCount ?: 0,
+            recipients = state.recipientsInRange,
+            rangeText = if (state.rangeIsCustom)
+                "rows ${state.startRow}–${state.endRow ?: groupTotal} of $groupTotal"
+            else null,
             simLabel = vm.selectedSim()?.label ?: "",
             throttleMs = state.throttleMs,
             jitter = state.jitter,
@@ -160,6 +169,89 @@ fun NewCampaignScreen(
                 }
             }
         )
+    }
+}
+
+@Composable
+private fun RangePicker(state: NewCampaignState, vm: NewCampaignViewModel) {
+    val total = state.groups.firstOrNull { it.id == state.selectedGroupId }?.contactCount ?: 0
+    if (total <= 0) return
+
+    var startText by remember(state.startRow) { mutableStateOf(state.startRow.toString()) }
+    var endText by remember(state.endRow, state.selectedGroupId) {
+        mutableStateOf((state.endRow ?: total).toString())
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Recipient range", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Send only to a slice of the group. Useful when resuming a previous run " +
+                    "or skipping numbers you've already messaged.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = startText,
+                    onValueChange = { v ->
+                        val digits = v.filter { it.isDigit() }.take(7)
+                        startText = digits
+                        digits.toIntOrNull()?.let { vm.setStartRow(it) }
+                    },
+                    label = { Text("From row") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = endText,
+                    onValueChange = { v ->
+                        val digits = v.filter { it.isDigit() }.take(7)
+                        endText = digits
+                        val parsed = digits.toIntOrNull()
+                        vm.setEndRow(parsed)
+                    },
+                    label = { Text("To row") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            val recipientCount = state.recipientsInRange
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (recipientCount > 0) "Will send to $recipientCount of $total"
+                    else "Invalid range",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (recipientCount > 0) MaterialTheme.colorScheme.onSurface
+                    else MaterialTheme.colorScheme.tertiary
+                )
+                if (state.rangeIsCustom) {
+                    androidx.compose.material3.TextButton(onClick = {
+                        vm.resetRange()
+                        startText = "1"
+                        endText = total.toString()
+                    }) { Text("Reset") }
+                }
+            }
+        }
     }
 }
 
