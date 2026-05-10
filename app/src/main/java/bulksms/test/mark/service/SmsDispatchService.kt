@@ -130,9 +130,16 @@ class SmsDispatchService : Service() {
                 val campaign = app.campaignRepo.getCampaign(campaignId) ?: break
                 if (campaign.status != CampaignStatus.RUNNING) break
 
-                guardCheck(campaign)?.let { reason ->
-                    pauseAndStop(campaign, reason.first, reason.second)
-                    return
+                val guardResult = guardCheck(campaign)
+                if (guardResult != null) {
+                    // Any system-level block (SIM removed, phone call, no service, low
+                    // battery, no signal, permission revoked, etc.) goes through the
+                    // auto-retry path. We wait up to 60s for the condition to clear
+                    // before pausing the campaign for real.
+                    if (handlePauseOrAutoRetry(campaign, guardResult.first, guardResult.second)) {
+                        return
+                    }
+                    // Cleared — fall through to normal dispatch.
                 }
 
                 // Reconcile any in-flight messages whose result broadcast didn't come back
@@ -144,12 +151,16 @@ class SmsDispatchService : Service() {
 
                 // Instability / balance pause checks (counters maintained by SmsResultReceiver)
                 if (genericFailureStreak >= 5) {
-                    pauseAndStop(campaign, PauseReason.BALANCE_SUSPECTED, "5 consecutive failures")
-                    return
+                    if (handlePauseOrAutoRetry(campaign, PauseReason.BALANCE_SUSPECTED, "5 consecutive failures")) {
+                        return
+                    }
+                    // Cleared via wait — counters were reset; continue.
                 }
                 if (failureStreak >= 3) {
-                    pauseAndStop(campaign, PauseReason.INSTABILITY, "3 consecutive failures")
-                    return
+                    if (handlePauseOrAutoRetry(campaign, PauseReason.INSTABILITY, "3 consecutive failures")) {
+                        return
+                    }
+                    // Cleared via wait — counters were reset; continue.
                 }
 
                 val recipient = app.campaignRepo.nextEligible(campaignId)
@@ -180,7 +191,7 @@ class SmsDispatchService : Service() {
                 // updates the recipient row + the failure counters asynchronously.
                 fireSend(campaign, recipient)
 
-                // Throttle delay paces the loop; the broadcast latency does NOT.
+                // Throttle delay paces the loop; broadcast latency does NOT.
                 delay(computeThrottle(campaign))
             }
         } catch (t: Throwable) {
@@ -190,6 +201,91 @@ class SmsDispatchService : Service() {
         } finally {
             stopSelfSafe()
         }
+    }
+
+    /**
+     * Unified pause-or-auto-retry handler. Called whenever the dispatcher decides the
+     * campaign should pause for any reason. For USER pauses, this calls pauseAndStop
+     * immediately. For any other reason, it enters a wait loop for up to 2 minutes,
+     * re-checking every 5 seconds whether the condition has cleared.
+     *
+     * Returns true if the campaign was paused (caller should `return` from runLoop).
+     * Returns false if the condition cleared during the wait (caller should continue).
+     */
+    private suspend fun handlePauseOrAutoRetry(
+        campaign: Campaign,
+        reason: PauseReason,
+        detail: String?
+    ): Boolean {
+        // User-initiated pauses are honored immediately.
+        if (reason == PauseReason.USER) {
+            pauseAndStop(campaign, reason, detail)
+            return true
+        }
+
+        val maxWaitMs = AUTO_RETRY_TOTAL_MS
+        val startMs = System.currentTimeMillis()
+
+        while (scope.isActive) {
+            val elapsed = System.currentTimeMillis() - startMs
+            val remaining = maxWaitMs - elapsed
+            if (remaining <= 0) {
+                val baseDetail = detail?.takeIf { it.isNotBlank() }?.let { "; $it" } ?: ""
+                pauseAndStop(campaign, reason, "Auto-retried for 2 min$baseDetail")
+                return true
+            }
+
+            val sleepMs = minOf(AUTO_RETRY_INTERVAL_MS, remaining)
+
+            val label = pauseReasonLabel(reason)
+            val secondsLeft = (remaining / 1000).coerceAtLeast(1).toInt()
+            updateWaitingNotification(campaign, "$label — auto-resuming ($secondsLeft s left)")
+
+            delay(sleepMs)
+            if (!scope.isActive) return true
+
+            // Reload — user may have manually paused/cancelled during the wait.
+            val current = app.campaignRepo.getCampaign(campaignId) ?: return true
+            if (current.status != CampaignStatus.RUNNING) return true
+
+            // Re-evaluate. If guardCheck still returns a problem, keep waiting.
+            val newGuard = guardCheck(current)
+            if (newGuard != null) continue
+
+            // Cleared. Reset failure streaks so the dispatcher gets a clean attempt.
+            failureStreak = 0
+            genericFailureStreak = 0
+            return false
+        }
+        return true
+    }
+
+    private fun pauseReasonLabel(r: PauseReason): String = when (r) {
+        PauseReason.SIM_REMOVED -> "SIM unavailable"
+        PauseReason.PHONE_CALL -> "Phone call active"
+        PauseReason.NO_SERVICE -> "No signal"
+        PauseReason.RATE_LIMIT -> "Rate limited"
+        PauseReason.DAILY_CAP -> "Daily cap reached"
+        PauseReason.INSTABILITY -> "Network unstable"
+        PauseReason.BALANCE_SUSPECTED -> "Balance suspected"
+        PauseReason.BATTERY_CRITICAL -> "Battery critical"
+        PauseReason.THERMAL -> "Phone overheating"
+        PauseReason.PERMISSION_REVOKED -> "Permission revoked"
+        PauseReason.STORAGE_FULL -> "Storage full"
+        PauseReason.ROAMING -> "Roaming"
+        PauseReason.USER -> "Paused"
+    }
+
+    private fun updateWaitingNotification(campaign: Campaign, message: String) {
+        val nm = ContextCompat.getSystemService(this, android.app.NotificationManager::class.java) ?: return
+        val n = DispatchNotifications.progress(
+            this, campaign.id, campaign.name,
+            sentCountFresh(), campaign.totalCount, currentRatePerMin(),
+            paused = true, pauseReasonText = message
+        )
+        try {
+            nm.notify(DispatchNotifications.NOTIF_ID_PROGRESS, n)
+        } catch (_: SecurityException) { /* notifications off */ }
     }
 
     private suspend fun guardCheck(campaign: Campaign): Pair<PauseReason, String?>? {
@@ -478,6 +574,13 @@ class SmsDispatchService : Service() {
         const val WAKELOCK_TIMEOUT_MS: Long = 12L * 3600 * 1000  // 12 hours
         const val MIN_THROTTLE_MS: Long = 500
         const val STALE_SENDING_CUTOFF_MS: Long = 60_000  // 60s — broadcast presumed lost
+        const val MAX_IN_FLIGHT: Int = 5  // cap concurrent unconfirmed sends to protect modem
+
+        /** Total time to spend auto-retrying any system pause before giving up. */
+        const val AUTO_RETRY_TOTAL_MS: Long = 2L * 60 * 1000  // 2 minutes
+
+        /** Interval between auto-retry attempts. */
+        const val AUTO_RETRY_INTERVAL_MS: Long = 5_000L  // 5 seconds
 
         @Volatile var isRunning: Boolean = false
             private set
