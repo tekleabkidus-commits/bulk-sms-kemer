@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.random.Random
+import java.util.Calendar
 
 /**
  * The single foreground service that drives a campaign end to end. There is at most one
@@ -129,6 +130,22 @@ class SmsDispatchService : Service() {
             while (scope.isActive) {
                 val campaign = app.campaignRepo.getCampaign(campaignId) ?: break
                 if (campaign.status != CampaignStatus.RUNNING) break
+
+                // -------- Quiet hours --------
+                // Pause sending overnight (20:00 - 09:00 local time). The dispatcher
+                // sleeps in 5-minute chunks rather than one big delay, so it stays
+                // responsive to status changes and ticks the countdown nicely.
+                if (isInQuietHours()) {
+                    val resumeAt = nextQuietHoursEnd()
+                    val msLeft = (resumeAt - System.currentTimeMillis()).coerceAtLeast(0L)
+                    updateWaitingNotification(
+                        campaign,
+                        "Quiet hours — sending resumes at ${formatTime(resumeAt)}"
+                    )
+                    val chunk = minOf(QUIET_HOURS_CHECK_INTERVAL_MS, msLeft).coerceAtLeast(1_000L)
+                    delay(chunk)
+                    continue
+                }
 
                 val guardResult = guardCheck(campaign)
                 if (guardResult != null) {
@@ -288,6 +305,43 @@ class SmsDispatchService : Service() {
         } catch (_: SecurityException) { /* notifications off */ }
     }
 
+    /** True if local time is within the quiet-hours window (default 20:00 - 09:00). */
+    private fun isInQuietHours(now: Long = System.currentTimeMillis()): Boolean {
+        val cal = Calendar.getInstance().apply { timeInMillis = now }
+        val hour = cal.get(Calendar.HOUR_OF_DAY)
+        // start hour is inclusive (20:00 is quiet); end hour is exclusive (09:00 is NOT quiet)
+        return hour >= QUIET_HOURS_START_HOUR || hour < QUIET_HOURS_END_HOUR
+    }
+
+    /** The next time quiet hours end (i.e., 09:00 today or tomorrow). */
+    private fun nextQuietHoursEnd(now: Long = System.currentTimeMillis()): Long {
+        val cal = Calendar.getInstance().apply {
+            timeInMillis = now
+            set(Calendar.HOUR_OF_DAY, QUIET_HOURS_END_HOUR)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        if (cal.timeInMillis <= now) {
+            cal.add(Calendar.DAY_OF_MONTH, 1)
+        }
+        return cal.timeInMillis
+    }
+
+    /** Format a wall-clock time as "9:00 AM" for the user-facing notification. */
+    private fun formatTime(epochMs: Long): String {
+        val cal = Calendar.getInstance().apply { timeInMillis = epochMs }
+        val hour24 = cal.get(Calendar.HOUR_OF_DAY)
+        val minute = cal.get(Calendar.MINUTE)
+        val hour12 = when {
+            hour24 == 0 -> 12
+            hour24 > 12 -> hour24 - 12
+            else -> hour24
+        }
+        val ampm = if (hour24 < 12) "AM" else "PM"
+        return "%d:%02d %s".format(hour12, minute, ampm)
+    }
+
     private suspend fun guardCheck(campaign: Campaign): Pair<PauseReason, String?>? {
         // 1. SEND_SMS revoked?
         if (!PermissionUtil.hasSendSms(this)) {
@@ -308,7 +362,7 @@ class SmsDispatchService : Service() {
         }
         // 5. Battery critical?
         val battery = BatteryUtil.snapshot(this)
-        if (battery.percent in 0..14 && !battery.charging) {
+        if (battery.percent in 0..4 && !battery.charging) {
             return PauseReason.BATTERY_CRITICAL to "${battery.percent}%"
         }
         // 6. Storage breathing room (we need at least ~5MB free for Room WAL).
@@ -581,6 +635,13 @@ class SmsDispatchService : Service() {
 
         /** Interval between auto-retry attempts. */
         const val AUTO_RETRY_INTERVAL_MS: Long = 5_000L  // 5 seconds
+
+        /** Quiet hours: dispatcher does not send between QUIET_HOURS_START_HOUR (inclusive) and QUIET_HOURS_END_HOUR (exclusive). */
+        const val QUIET_HOURS_START_HOUR: Int = 20  // 8 PM
+        const val QUIET_HOURS_END_HOUR: Int = 9    // 9 AM
+
+        /** While in quiet hours, dispatcher wakes this often to re-check the time and update the notification countdown. */
+        const val QUIET_HOURS_CHECK_INTERVAL_MS: Long = 5L * 60 * 1000  // 5 minutes
 
         @Volatile var isRunning: Boolean = false
             private set
