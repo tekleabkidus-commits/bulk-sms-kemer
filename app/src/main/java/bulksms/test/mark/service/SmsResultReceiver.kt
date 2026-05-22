@@ -52,6 +52,17 @@ class SmsResultReceiver : BroadcastReceiver() {
         val current = app.database.recipientDao().getById(recipientId) ?: return
         if (current.status != bulksms.test.mark.data.entity.RecipientStatus.SENDING) return
 
+        // Distrust broadcasts that arrive during the 10-second window following a network
+        // interrupt (incoming call, SIM dropping briefly). The Android SmsManager API
+        // commonly broadcasts RESULT_OK during these windows even when the modem never
+        // actually transmitted the message — the system's own messaging app then shows
+        // the SMS as failed. We salvage these recipients back to PENDING so they get
+        // re-sent fresh once the interrupt clears.
+        if (SmsDispatchService.recentlyInterrupted()) {
+            app.campaignRepo.salvageRecipient(recipientId)
+            return
+        }
+
         if (code != Activity.RESULT_OK) {
             // Any failed segment fails the whole message.
             finalizeFailure(app.campaignRepo, recipientId, attemptNumber, code)

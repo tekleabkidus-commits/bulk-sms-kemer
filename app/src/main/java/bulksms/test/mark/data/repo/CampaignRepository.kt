@@ -164,6 +164,17 @@ class CampaignRepository(
         recipientDao.markRetryLater(id, nextAt, err, code)
     }
 
+    /**
+     * Salvage a recipient whose broadcast arrived during a known network interrupt
+     * window. Resets to PENDING with attempts decremented (so this attempt doesn't count
+     * toward the retry budget) and schedules retry in ~10 seconds. Called by the receiver
+     * when SmsDispatchService.recentlyInterrupted() returns true.
+     */
+    suspend fun salvageRecipient(id: Long) {
+        val nextAt = System.currentTimeMillis() + 10_000L
+        recipientDao.salvageRecipient(id, nextAt)
+    }
+
     // ---------- Recipient queries ----------
 
     fun observeStatusCounts(id: Long) = recipientDao.observeStatusCounts(id)

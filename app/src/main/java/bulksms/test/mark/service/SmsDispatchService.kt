@@ -8,7 +8,10 @@ import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.telephony.PhoneStateListener
+import android.telephony.ServiceState
 import android.telephony.SmsManager
+import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import bulksms.test.mark.BulkSmsApp
 import bulksms.test.mark.data.entity.Campaign
@@ -68,6 +71,7 @@ class SmsDispatchService : Service() {
         app = applicationContext as BulkSmsApp
         isRunning = true
         registerLocalReceivers()
+        registerPhoneStateMonitor()
         callMonitor = CallStateMonitor(this).also { it.start() }
         simMonitor = SimChangeMonitor(this) { /* checked inline by guards */ }.also { it.start() }
         thermalMonitor = ThermalMonitor(this).also { it.start() }
@@ -240,6 +244,12 @@ class SmsDispatchService : Service() {
             return true
         }
 
+        // Salvage any in-flight messages so the modem's false-positive SENT broadcasts
+        // (which it tends to fire en-masse when the radio drops for a call or SIM
+        // interruption) don't corrupt our "Sent" count. Rolling them back to PENDING
+        // makes the receiver's idempotency check ignore those bogus broadcasts.
+        salvageInFlightOnInterruption(reason)
+
         val maxWaitMs = AUTO_RETRY_TOTAL_MS
         val startMs = System.currentTimeMillis()
 
@@ -275,6 +285,48 @@ class SmsDispatchService : Service() {
             return false
         }
         return true
+    }
+
+    /**
+     * Roll back every recipient currently in SENDING for this campaign so the upcoming
+     * burst of (likely false-positive) result broadcasts from the modem doesn't corrupt
+     * the campaign's Sent/Failed counts. Only triggered for clear network interruptions
+     * (phone call, no signal, SIM removed) where the modem is known to lie about
+     * delivery status when the radio comes back online.
+     *
+     * Implementation:
+     * - status SENDING -> PENDING (so receiver's idempotency check skips stale broadcasts)
+     * - attempts decremented by 1 (so this interrupted attempt doesn't burn a retry)
+     * - nextEligibleAt = now + 30s (a cooldown so the dispatcher doesn't race the
+     *   incoming stale broadcasts; by 30s they've all arrived and been ignored)
+     * - lastError set to a human-readable interruption note
+     */
+    private fun salvageInFlightOnInterruption(reason: PauseReason) {
+        if (reason !in SALVAGE_REASONS) return
+        try {
+            val nextEligible = System.currentTimeMillis() + SALVAGE_COOLDOWN_MS
+            val note = when (reason) {
+                PauseReason.PHONE_CALL -> "Salvaged: phone call interrupted send"
+                PauseReason.NO_SERVICE -> "Salvaged: lost signal during send"
+                PauseReason.SIM_REMOVED -> "Salvaged: SIM removed during send"
+                else -> "Salvaged: interrupted (${reason.name})"
+            }
+            app.database.openHelper.writableDatabase.execSQL(
+                """
+                UPDATE recipients
+                SET status = 'PENDING',
+                    attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                    nextEligibleAt = ?,
+                    sendingStartedAt = NULL,
+                    lastError = ?
+                WHERE campaignId = ? AND status = 'SENDING'
+                """.trimIndent(),
+                arrayOf<Any>(nextEligible, note, campaignId)
+            )
+        } catch (_: Throwable) {
+            // Best-effort. If salvage fails (schema mismatch, DB locked, etc.) the existing
+            // per-message retry mechanism is still in place as a fallback.
+        }
     }
 
     private fun pauseReasonLabel(r: PauseReason): String = when (r) {
@@ -523,6 +575,55 @@ class SmsDispatchService : Service() {
         runCatching { unregisterReceiver(deliveredReceiver) }
     }
 
+    // ----------------- Phone-state interrupt monitor -----------------
+    //
+    // Watches for incoming calls and service-state drops. When either happens, marks
+    // a static timestamp; SmsResultReceiver consults `recentlyInterrupted()` and treats
+    // any broadcast arriving inside the distrust window as suspect (salvages the row
+    // back to PENDING instead of trusting the modem's RESULT_OK).
+    //
+    // This solves the "20-30 in-flight messages all report SENT but actually failed"
+    // problem we see when a phone call drops the radio mid-burst.
+
+    private var telephonyManager: TelephonyManager? = null
+    private var phoneStateListener: PhoneStateListener? = null
+
+    private fun registerPhoneStateMonitor() {
+        val tm = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return
+        telephonyManager = tm
+        phoneStateListener = object : PhoneStateListener() {
+            override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                if (state == TelephonyManager.CALL_STATE_RINGING ||
+                    state == TelephonyManager.CALL_STATE_OFFHOOK) {
+                    markInterrupt()
+                }
+            }
+            override fun onServiceStateChanged(serviceState: ServiceState?) {
+                val s = serviceState?.state ?: return
+                if (s == ServiceState.STATE_OUT_OF_SERVICE ||
+                    s == ServiceState.STATE_POWER_OFF ||
+                    s == ServiceState.STATE_EMERGENCY_ONLY) {
+                    markInterrupt()
+                }
+            }
+        }
+        try {
+            tm.listen(
+                phoneStateListener,
+                PhoneStateListener.LISTEN_CALL_STATE or PhoneStateListener.LISTEN_SERVICE_STATE
+            )
+        } catch (_: SecurityException) { /* READ_PHONE_STATE not granted; gracefully no-op */ }
+        catch (_: Throwable) { /* unexpected, but don't crash the service */ }
+    }
+
+    private fun unregisterPhoneStateMonitor() {
+        val tm = telephonyManager ?: return
+        val l = phoneStateListener ?: return
+        runCatching { tm.listen(l, PhoneStateListener.LISTEN_NONE) }
+        telephonyManager = null
+        phoneStateListener = null
+    }
+
     // --------------------------- Notification + Wakelock ---------------------------
 
     private fun startForegroundForCampaign(campaign: Campaign, sent: Int, ratePerMin: Int) {
@@ -610,6 +711,7 @@ class SmsDispatchService : Service() {
         try {
             isRunning = false
             unregisterLocalReceivers()
+            unregisterPhoneStateMonitor()
             callMonitor.stop()
             simMonitor.stop()
             thermalMonitor.stop()
@@ -642,6 +744,48 @@ class SmsDispatchService : Service() {
 
         /** While in quiet hours, dispatcher wakes this often to re-check the time and update the notification countdown. */
         const val QUIET_HOURS_CHECK_INTERVAL_MS: Long = 5L * 60 * 1000  // 5 minutes
+
+        /**
+         * Window during which broadcasts that arrive after a network interrupt
+         * (phone call, SIM dropping briefly, service state going OUT_OF_SERVICE) are
+         * distrusted. Any RESULT_OK or failure code that arrives inside this window is
+         * treated as "modem lying" — the recipient is salvaged back to PENDING rather
+         * than trusted as SENT/FAILED.
+         */
+        const val INTERRUPT_DISTRUST_WINDOW_MS: Long = 10_000L
+
+        /** Last time a network interrupt was observed (call ringing/active, service drop). */
+        @Volatile var lastInterruptAt: Long = 0L
+            private set
+
+        /** Called by the phone-state listener to record an interrupt. */
+        fun markInterrupt() {
+            lastInterruptAt = System.currentTimeMillis()
+        }
+
+        /**
+         * True if we observed a network interrupt within the distrust window. Called by
+         * SmsResultReceiver before trusting an SMS result broadcast.
+         */
+        fun recentlyInterrupted(): Boolean {
+            val at = lastInterruptAt
+            if (at == 0L) return false
+            return System.currentTimeMillis() - at < INTERRUPT_DISTRUST_WINDOW_MS
+        }
+
+        /**
+         * Pause reasons that indicate a network interruption likely to cause false-positive
+         * SENT broadcasts from the modem when the radio recovers. For these, we salvage
+         * in-flight messages back to PENDING before the bad broadcasts arrive.
+         */
+        val SALVAGE_REASONS: Set<PauseReason> = setOf(
+            PauseReason.PHONE_CALL,
+            PauseReason.NO_SERVICE,
+            PauseReason.SIM_REMOVED
+        )
+
+        /** Cooldown before salvaged messages become eligible for re-dispatch. */
+        const val SALVAGE_COOLDOWN_MS: Long = 30_000L
 
         @Volatile var isRunning: Boolean = false
             private set

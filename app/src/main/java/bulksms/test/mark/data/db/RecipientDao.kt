@@ -90,6 +90,27 @@ interface RecipientDao {
     suspend fun markRetryLater(id: Long, nextAt: Long, err: String, code: Int?)
 
     /**
+     * Salvage a single recipient that was in SENDING when a network interrupt occurred
+     * (incoming call, SIM going briefly offline, service-state change). Rolls status
+     * back to PENDING, decrements attempts so the interrupt does NOT burn the retry
+     * budget, and schedules a short retry delay so it gets re-sent once the interrupt
+     * clears. Note: we do NOT WHERE-filter on status here, because by design we want to
+     * be able to "undo" a row that the receiver may have just (incorrectly) marked SENT
+     * during the interrupt window.
+     */
+    @Query("""
+        UPDATE recipients
+        SET status = 'PENDING',
+            attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+            nextEligibleAt = :nextAt,
+            sendingStartedAt = NULL,
+            sentAt = NULL,
+            lastError = 'Salvaged - network interrupt'
+        WHERE id = :id
+    """)
+    suspend fun salvageRecipient(id: Long, nextAt: Long)
+
+    /**
      * Recover stale SENDING entries: if the SENT broadcast never arrived and the row has been
      * "SENDING" for more than [staleMs], assume it was actually sent (we don't want duplicates).
      */
