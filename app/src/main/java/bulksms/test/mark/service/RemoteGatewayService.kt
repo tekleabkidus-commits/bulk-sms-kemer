@@ -44,6 +44,7 @@ class RemoteGatewayService : Service() {
     private lateinit var store: GatewayEventStore
     private var running=false
     private var lastHeartbeat=0L
+    private var lastSendAt=0L
 
     override fun onCreate() {
         super.onCreate()
@@ -114,15 +115,26 @@ class RemoteGatewayService : Service() {
                 if((applicationContext as BulkSmsApp).campaignRepo.activeCampaignId()!=null) {
                     lastStatus="Local campaign active; remote gateway paused"; delay(5000); continue
                 }
-                if(store.inFlight()) {
-                    lastStatus="Awaiting carrier acknowledgment"; delay(900); continue
+                if(store.recentUncertainOrFailed()>=3) {
+                    // Fail closed on a problematic modem/carrier, rather than losing a large campaign.
+                    lastStatus="Paused after 3 uncertain/failed SMS in 5 min. Check SIM and reports."
+                    prefs.enabled=false
+                    stopSelf()
+                    break
                 }
+                if(store.inFlightCount()>=prefs.maxInFlight) {
+                    lastStatus="Awaiting carrier acknowledgment"; delay(800); continue
+                }
+                val minDelay=when(prefs.maxInFlight) { 1->3000L;2->2000L;else->1500L }
+                val remaining=(lastSendAt+minDelay-System.currentTimeMillis()).coerceAtLeast(0L)
+                if(remaining>0L) { delay(remaining); continue }
                 val response=client.post("/api/v1/device/claim",token,JSONObject())
                 val job=response.optJSONObject("job")
                 if(job==null) { lastStatus="Online · waiting for campaigns"; delay(4000); continue }
                 lastStatus="Sending remote campaign #${job.optLong("campaign_id")}"
                 transmit(job)
-                delay(1000)
+                lastSendAt=System.currentTimeMillis()
+                delay(500)
             } catch(c: CancellationException) { throw c }
               catch(e: Exception) {
                   lastStatus=(e.message ?: "Connection error").take(100)

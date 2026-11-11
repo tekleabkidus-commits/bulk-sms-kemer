@@ -44,10 +44,17 @@ class GatewayEventStore(context: Context) {
         }
         prefs.edit().putString(key(id),v.toString()).commit()
     }
-    fun inFlight(): Boolean = synchronized(lock) {
-        prefs.all.values.any { value ->
+    fun inFlightCount(): Int = synchronized(lock) {
+        prefs.all.values.count { value ->
             val v=runCatching { JSONObject(value as String) }.getOrNull()
             v?.optString("status")=="inflight" && System.currentTimeMillis()-v.optLong("since")<120000L
+        }
+    }
+    fun recentUncertainOrFailed(): Int = synchronized(lock) {
+        prefs.all.values.count { value ->
+            val v=runCatching { JSONObject(value as String) }.getOrNull()
+            v!=null && v.optString("status") in listOf("unknown","failed") &&
+                System.currentTimeMillis()-v.optLong("since")<5L*60*1000
         }
     }
     fun pendingReports(): List<JSONObject> = synchronized(lock) {

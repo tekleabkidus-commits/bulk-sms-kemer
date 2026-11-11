@@ -37,6 +37,7 @@ fun AccountScreen() {
     var connected by remember { mutableStateOf(prefs.userToken.isNotBlank()) }
     var linked by remember { mutableStateOf(prefs.deviceToken.isNotBlank()) }
     var enabled by remember { mutableStateOf(prefs.enabled) }
+    var speed by remember { mutableIntStateOf(prefs.maxInFlight) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var status by remember { mutableStateOf(RemoteGatewayService.lastStatus) }
@@ -113,6 +114,16 @@ fun AccountScreen() {
                     Text("Selected SIM: ${sims.firstOrNull { it.subscriptionId==prefs.simId }?.label ?: "Unavailable"}")
                     Text("Gateway: $status",style=MaterialTheme.typography.bodyMedium)
                     Text("Remote SMS sending is user-initiated. Android/carrier background limits still apply.")
+                    Text("Sending capacity: $speed in flight (lower is safer)")
+                    Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+                        listOf(1,2,3).forEach { level ->
+                            OutlinedButton(enabled=!enabled,onClick={speed=level;prefs.maxInFlight=level}) {
+                                Text(when(level){1->"Safe";2->"Balanced";else->"Faster"})
+                            }
+                        }
+                    }
+                    if(speed>1) Text("Higher speed increases carrier rejection risk. Test on your SIM first.",
+                        color=MaterialTheme.colorScheme.error)
                     Row(horizontalArrangement=Arrangement.spacedBy(10.dp)) {
                         Button(enabled=!enabled,onClick={
                             error=""

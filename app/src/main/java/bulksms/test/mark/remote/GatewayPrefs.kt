@@ -25,6 +25,10 @@ class GatewayPrefs(context: Context) {
     var simId: Int
         get() = prefs.getInt("sim_id", -1)
         set(value) { prefs.edit().putInt("sim_id", value).apply() }
+    /** Conservative default: 1 in flight. More concurrency requires carrier testing. */
+    var maxInFlight: Int
+        get() = prefs.getInt("max_in_flight", 1).coerceIn(1,3)
+        set(value) { prefs.edit().putInt("max_in_flight",value.coerceIn(1,3)).apply() }
     var enabled: Boolean
         get() = prefs.getBoolean("enabled", false)
         set(value) { prefs.edit().putBoolean("enabled", value).apply() }
