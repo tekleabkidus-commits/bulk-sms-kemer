@@ -7,6 +7,7 @@ sealed class Screen(val route: String) {
     data object Contacts  : Screen("contacts")
     data object Templates : Screen("templates")
     data object Sent      : Screen("sent")
+    data object Account   : Screen("account")
 
     // Pre-app gates
     data object Permission   : Screen("permission")

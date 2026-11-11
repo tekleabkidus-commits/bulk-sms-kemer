@@ -6,6 +6,7 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import bulksms.test.mark.ui.account.AccountScreen
 import bulksms.test.mark.ui.campaigns.CampaignDetailScreen
 import bulksms.test.mark.ui.campaigns.CampaignsScreen
 import bulksms.test.mark.ui.campaigns.NewCampaignScreen
@@ -143,6 +144,11 @@ fun AppNavHost(
                 templateId = id,
                 onDone = { navController.popBackStack() }
             )
+        }
+
+        composable(Screen.Account.route) {
+            onTabsVisibleChange(true)
+            AccountScreen()
         }
 
         composable(Screen.Sent.route) {

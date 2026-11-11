@@ -1,6 +1,8 @@
 package bulksms.test.mark.ui.sent
 
 import android.app.Application
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -142,7 +144,7 @@ fun SentMessagesScreen(vm: SentMessagesViewModel = viewModel()) {
                 AssistChip(onClick = { vm.clearDate() }, label = { Text("All") })
             }
             Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusFilterChip("Sent", filter.status == RecipientStatus.SENT) {
                     vm.setStatus(if (filter.status == RecipientStatus.SENT) null else RecipientStatus.SENT)
                 }
@@ -151,6 +153,9 @@ fun SentMessagesScreen(vm: SentMessagesViewModel = viewModel()) {
                 }
                 StatusFilterChip("Failed", filter.status == RecipientStatus.FAILED) {
                     vm.setStatus(if (filter.status == RecipientStatus.FAILED) null else RecipientStatus.FAILED)
+                }
+                StatusFilterChip("Unknown", filter.status == RecipientStatus.UNKNOWN) {
+                    vm.setStatus(if (filter.status == RecipientStatus.UNKNOWN) null else RecipientStatus.UNKNOWN)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -188,7 +193,7 @@ fun SentMessagesScreen(vm: SentMessagesViewModel = viewModel()) {
                 "Sent" to (count(RecipientStatus.SENT) + count(RecipientStatus.DELIVERED)).toString(),
                 "Delivered" to count(RecipientStatus.DELIVERED).toString(),
                 "Failed" to count(RecipientStatus.FAILED).toString(),
-                "Pending" to count(RecipientStatus.PENDING).toString()
+                "Unknown" to count(RecipientStatus.UNKNOWN).toString()
             ))
             Spacer(Modifier.height(8.dp))
 

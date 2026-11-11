@@ -1,0 +1,40 @@
+name: Laravel Backoffice CI
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backoffice
+    steps:
+      - uses: actions/checkout@v4
+      - name: PHP 8.3 and extensions
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, dom, json, pdo_sqlite, openssl, fileinfo, intl
+          coverage: none
+      - name: Validate composer manifest
+        run: composer validate --no-check-publish
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Configure test application
+        run: |
+          cp .env.example .env
+          mkdir -p bootstrap/cache database storage/framework/views storage/framework/sessions storage/framework/cache/data storage/logs
+          touch database/database.sqlite
+          sed -i 's|^DB_DATABASE=.*|DB_DATABASE=database/database.sqlite|' .env
+          sed -i 's|^SESSION_SECURE_COOKIE=.*|SESSION_SECURE_COOKIE=false|' .env
+          php artisan key:generate
+          php artisan migrate --force
+      - name: PHP syntax lint
+        run: find app routes config bootstrap database -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: API and tenant tests
+        run: ./vendor/bin/phpunit -c phpunit.xml

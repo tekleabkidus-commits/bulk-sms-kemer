@@ -8,6 +8,7 @@ enum class RecipientStatus {
     SENT,       // SENT broadcast received with RESULT_OK
     DELIVERED,  // DELIVERED broadcast received
     FAILED,     // permanent failure (after all retries)
+    UNKNOWN,    // submission uncertain, never automatically retried
     INVALID,    // bad number format, missing field, etc. — never attempted
     SKIPPED     // duplicate or otherwise filtered out
 }
