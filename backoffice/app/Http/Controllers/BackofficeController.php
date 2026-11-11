@@ -13,6 +13,7 @@ class BackofficeController {
     public function loginPage() { return view('auth',['mode'=>'login']); }
     public function registerPage() { return view('auth',['mode'=>'register']); }
     public function register(Request $r) {
+        $r->merge(['email'=>strtolower(trim((string)$r->input('email')))]);
         $data=$r->validate(['name'=>'required|string|max:100','email'=>'required|email|unique:users,email','password'=>'required|string|min:12|confirmed']);
         $id=DB::transaction(function() use ($data) {
             $user=User::create(['name'=>$data['name'],'email'=>strtolower($data['email']),'password'=>$data['password']]);
@@ -68,6 +69,9 @@ class BackofficeController {
         $data=$r->validate(['email'=>'required|email','role'=>'required|in:admin,manager,operator,viewer']);
         $user=DB::table('users')->where('email',strtolower($data['email']))->first();
         if (!$user) return back()->withErrors(['email'=>'User must register first.']);
+        // The organization owner cannot be demoted through staff administration.
+        $existing=DB::table('memberships')->where('workspace_id',$w->id)->where('user_id',$user->id)->first();
+        abort_if($existing && $existing->role==='owner',403,'Cannot change owner role.');
         DB::table('memberships')->updateOrInsert(['workspace_id'=>$w->id,'user_id'=>$user->id],
             ['role'=>$data['role'],'updated_at'=>now(),'created_at'=>now()]);
         Tenant::log($w,'member.upsert',$user->id);

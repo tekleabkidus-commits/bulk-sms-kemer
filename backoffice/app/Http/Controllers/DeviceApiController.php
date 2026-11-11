@@ -28,6 +28,17 @@ class DeviceApiController {
                 ->where('lease_expires_at','<',now())
                 ->whereIn('campaign_id',DB::table('campaigns')->select('id')->where('device_id',$d->id))
                 ->update(['status'=>'unknown','error'=>'Receipt timeout; manual reconciliation required','updated_at'=>now()]);
+            // A contact can opt out after a campaign was queued. Respect it at claim time.
+            $suppressed=DB::table('campaign_recipients as r')
+                ->join('campaigns as c','c.id','=','r.campaign_id')
+                ->join('contacts as ct','ct.id','=','r.contact_id')
+                ->where('c.device_id',$d->id)->where('c.workspace_id',$d->workspace_id)
+                ->where('r.status','queued')
+                ->where(function($q) { $q->where('ct.opted_in',false)->orWhereNotNull('ct.opted_out_at'); })
+                ->pluck('r.id');
+            if($suppressed->isNotEmpty()) DB::table('campaign_recipients')
+                ->whereIn('id',$suppressed)->where('status','queued')
+                ->update(['status'=>'cancelled','error'=>'Recipient opted out','updated_at'=>now()]);
             $row=DB::table('campaign_recipients as r')
                 ->join('campaigns as c','c.id','=','r.campaign_id')
                 ->where('c.device_id',$d->id)->where('c.workspace_id',$d->workspace_id)

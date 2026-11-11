@@ -43,6 +43,7 @@ class RemoteGatewayService : Service() {
     private lateinit var prefs: GatewayPrefs
     private lateinit var store: GatewayEventStore
     private var running=false
+    private var lastHeartbeat=0L
 
     override fun onCreate() {
         super.onCreate()
@@ -99,10 +100,13 @@ class RemoteGatewayService : Service() {
                 val battery=(getSystemService(BATTERY_SERVICE) as BatteryManager)
                     .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
                 val sim=SimRepository(this).listActive().firstOrNull { it.subscriptionId==prefs.simId }
-                client.post("/api/v1/device/heartbeat",token,JSONObject()
-                    .put("battery",if(battery in 0..100) battery else JSONObject.NULL)
-                    .put("sim_label",sim?.label ?: "SIM unavailable")
-                    .put("app_version","1.1.0"))
+                if(System.currentTimeMillis()-lastHeartbeat>30000L) {
+                    client.post("/api/v1/device/heartbeat",token,JSONObject()
+                        .put("battery",if(battery in 0..100) battery else JSONObject.NULL)
+                        .put("sim_label",sim?.label ?: "SIM unavailable")
+                        .put("app_version","1.1.0"))
+                    lastHeartbeat=System.currentTimeMillis()
+                }
                 if(ContextCompat.checkSelfPermission(this,Manifest.permission.SEND_SMS)!=PackageManager.PERMISSION_GRANTED) {
                     lastStatus="SMS permission required"; delay(5000); continue
                 }
@@ -159,6 +163,12 @@ class RemoteGatewayService : Service() {
             putExtra("parts_total",total)
         }
         return PendingIntent.getBroadcast(this,0,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+    // Android 15 dataSync foreground-service time budget: stop promptly on platform timeout.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        prefs.enabled=false
+        lastStatus="Android service time limit reached"
+        stopSelf()
     }
     override fun onDestroy() {
         running=false
