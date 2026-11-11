@@ -148,6 +148,9 @@ class CampaignRepository(
     suspend fun markDelivered(id: Long) =
         recipientDao.markDelivered(id, System.currentTimeMillis())
 
+    suspend fun markUnknown(id: Long, reason: String) =
+        recipientDao.markUnknown(id, reason)
+
     suspend fun markFailed(id: Long, err: String, code: Int?) =
         recipientDao.markFailed(id, err, code)
 

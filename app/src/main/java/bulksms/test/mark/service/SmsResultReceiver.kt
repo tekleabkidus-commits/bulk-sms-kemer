@@ -14,7 +14,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Registered programmatically by SmsDispatchService. Fires once per multipart segment.
- * We only finalize the recipient on the LAST part to avoid premature SENT / FAILED transitions.
+ * Aggregate ALL sent callbacks before finalizing; any partial multipart failure is UNKNOWN.
  */
 class SmsResultReceiver : BroadcastReceiver() {
 
@@ -23,7 +23,6 @@ class SmsResultReceiver : BroadcastReceiver() {
         val attemptNumber = intent.getIntExtra(EXTRA_ATTEMPT, 1)
         val partIndex = intent.getIntExtra(EXTRA_PART_INDEX, 0)
         val totalParts = intent.getIntExtra(EXTRA_TOTAL_PARTS, 1)
-        val isLastPart = partIndex == totalParts - 1
         val code = resultCode
 
         if (recipientId <= 0L) return
@@ -32,7 +31,7 @@ class SmsResultReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                handle(app, recipientId, attemptNumber, code, isLastPart)
+                handle(context, app, recipientId, attemptNumber, code, partIndex, totalParts)
             } finally {
                 pending.finish()
             }
@@ -40,17 +39,20 @@ class SmsResultReceiver : BroadcastReceiver() {
     }
 
     private suspend fun handle(
+        context: Context,
         app: BulkSmsApp,
         recipientId: Long,
         attemptNumber: Int,
         code: Int,
-        isLastPart: Boolean
+        partIndex: Int,
+        totalParts: Int
     ) {
         // Idempotency: only act if this recipient is still in SENDING state. If a
         // previous broadcast (e.g., an earlier part that failed) already finalized this
         // recipient, ignore subsequent broadcasts so we don't double-count.
         val current = app.database.recipientDao().getById(recipientId) ?: return
         if (current.status != bulksms.test.mark.data.entity.RecipientStatus.SENDING) return
+        if (current.attempts != attemptNumber) return // stale callback from prior attempt
 
         // Distrust broadcasts that arrive during the 10-second window following a network
         // interrupt (incoming call, SIM dropping briefly). The Android SmsManager API
@@ -59,22 +61,26 @@ class SmsResultReceiver : BroadcastReceiver() {
         // the SMS as failed. We salvage these recipients back to PENDING so they get
         // re-sent fresh once the interrupt clears.
         if (SmsDispatchService.recentlyInterrupted()) {
-            app.campaignRepo.salvageRecipient(recipientId)
+            app.campaignRepo.markUnknown(recipientId, "Network interrupt near SMS submission")
             return
         }
 
-        if (code != Activity.RESULT_OK) {
-            // Any failed segment fails the whole message.
-            finalizeFailure(app.campaignRepo, recipientId, attemptNumber, code)
-            SmsDispatchService.recordFailure(
-                isGeneric = code == SmsManager.RESULT_ERROR_GENERIC_FAILURE
-            )
-            return
-        }
-        // RESULT_OK: only finalize on the last part. Earlier parts are no-op (status stays SENDING).
-        if (isLastPart) {
-            app.campaignRepo.markSent(recipientId, code)
-            SmsDispatchService.recordSuccess()
+        when (SmsSegmentAckStore.sent(context,recipientId,attemptNumber,partIndex,totalParts,code==Activity.RESULT_OK)) {
+            SmsSegmentAckStore.Outcome.WAIT -> return
+            SmsSegmentAckStore.Outcome.AMBIGUOUS -> {
+                app.campaignRepo.markUnknown(recipientId, "Multipart SMS partially sent or failed; manual review")
+                SmsDispatchService.recordFailure(isGeneric=code==SmsManager.RESULT_ERROR_GENERIC_FAILURE)
+            }
+            SmsSegmentAckStore.Outcome.FAILURE -> {
+                finalizeFailure(app.campaignRepo,recipientId,attemptNumber,code)
+                SmsDispatchService.recordFailure(isGeneric=code==SmsManager.RESULT_ERROR_GENERIC_FAILURE)
+            }
+            SmsSegmentAckStore.Outcome.COMPLETE -> {
+                app.campaignRepo.markSent(recipientId,code)
+                if(SmsSegmentAckStore.deliveryComplete(context,recipientId,totalParts))
+                    app.campaignRepo.markDelivered(recipientId)
+                SmsDispatchService.recordSuccess()
+            }
         }
     }
 

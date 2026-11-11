@@ -68,12 +68,15 @@ interface RecipientDao {
     @Query("""
         UPDATE recipients
         SET status = 'SENT', sentAt = :now, smsResultCode = :code, lastError = NULL
-        WHERE id = :id
+        WHERE id = :id AND status = 'SENDING'
     """)
     suspend fun markSent(id: Long, now: Long, code: Int)
 
-    @Query("UPDATE recipients SET status = 'DELIVERED', deliveredAt = :now WHERE id = :id")
+    @Query("UPDATE recipients SET status = 'DELIVERED', deliveredAt = :now WHERE id = :id AND status IN ('SENT','UNKNOWN','DELIVERED')")
     suspend fun markDelivered(id: Long, now: Long)
+
+    @Query("UPDATE recipients SET status = 'UNKNOWN', lastError = :reason WHERE id = :id AND status IN ('SENDING','SENT')")
+    suspend fun markUnknown(id: Long, reason: String)
 
     @Query("""
         UPDATE recipients
@@ -89,24 +92,11 @@ interface RecipientDao {
     """)
     suspend fun markRetryLater(id: Long, nextAt: Long, err: String, code: Int?)
 
-    /**
-     * Salvage a single recipient that was in SENDING when a network interrupt occurred
-     * (incoming call, SIM going briefly offline, service-state change). Rolls status
-     * back to PENDING, decrements attempts so the interrupt does NOT burn the retry
-     * budget, and schedules a short retry delay so it gets re-sent once the interrupt
-     * clears. Note: we do NOT WHERE-filter on status here, because by design we want to
-     * be able to "undo" a row that the receiver may have just (incorrectly) marked SENT
-     * during the interrupt window.
-     */
+    /** Network interruption: delivery is ambiguous. Never blindly resend. */
     @Query("""
         UPDATE recipients
-        SET status = 'PENDING',
-            attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
-            nextEligibleAt = :nextAt,
-            sendingStartedAt = NULL,
-            sentAt = NULL,
-            lastError = 'Salvaged - network interrupt'
-        WHERE id = :id
+        SET status = 'UNKNOWN', lastError = 'Network interruption: SMS submission uncertain'
+        WHERE id = :id AND status IN ('SENDING','SENT')
     """)
     suspend fun salvageRecipient(id: Long, nextAt: Long)
 
@@ -116,7 +106,7 @@ interface RecipientDao {
      */
     @Query("""
         UPDATE recipients
-        SET status = 'SENT', sentAt = COALESCE(sentAt, :now), lastError = 'Stale-recovered'
+        SET status = 'UNKNOWN', lastError = 'Sent callback timed out; status uncertain'
         WHERE status = 'SENDING' AND sendingStartedAt IS NOT NULL AND sendingStartedAt < :cutoff
     """)
     suspend fun recoverStaleSending(now: Long, cutoff: Long): Int
@@ -159,8 +149,8 @@ interface RecipientDao {
     @Query("SELECT COUNT(*) FROM recipients WHERE campaignId = :id AND status = 'SENDING'")
     suspend fun sendingCount(id: Long): Int
 
-    /** Reset any SENDING rows back to PENDING for clean dispatch resume (called rarely). */
-    @Query("UPDATE recipients SET status = 'PENDING' WHERE campaignId = :id AND status = 'SENDING'")
+    /** A restarting process cannot assume whether in-flight SMS reached the modem. */
+    @Query("UPDATE recipients SET status = 'UNKNOWN', lastError = 'App restarted while sending' WHERE campaignId = :id AND status = 'SENDING'")
     suspend fun resetSending(id: Long)
 
     /** Re-queue all FAILED rows in a campaign for manual retry. */

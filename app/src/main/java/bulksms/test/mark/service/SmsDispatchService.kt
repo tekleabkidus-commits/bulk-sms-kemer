@@ -164,9 +164,8 @@ class SmsDispatchService : Service() {
                 }
 
                 // Reconcile any in-flight messages whose result broadcast didn't come back
-                // within the window. The SMS has been handed to the radio at that point;
-                // we treat lost broadcasts as "sent" (with a Stale-recovered note) rather
-                // than blocking the dispatcher waiting on them.
+                // within the window. Missing callbacks are UNKNOWN, never falsely SENT,
+                // and must be checked before any intentional retry.
                 val now0 = System.currentTimeMillis()
                 app.database.recipientDao().recoverStaleSending(now0, now0 - STALE_SENDING_CUTOFF_MS)
 
@@ -321,7 +320,7 @@ class SmsDispatchService : Service() {
                     lastError = ?
                 WHERE campaignId = ? AND status = 'SENDING'
                 """.trimIndent(),
-                arrayOf<Any>(nextEligible, note, campaignId)
+                arrayOf<Any>(note.replace("Salvaged", "Submission uncertain"), campaignId)
             )
         } catch (_: Throwable) {
             // Best-effort. If salvage fails (schema mismatch, DB locked, etc.) the existing
