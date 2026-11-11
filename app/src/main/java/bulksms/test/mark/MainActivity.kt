@@ -11,6 +11,7 @@ import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Notes
 import androidx.compose.material.icons.outlined.PeopleAlt
+import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -95,7 +96,8 @@ class MainActivity : ComponentActivity() {
             BottomItem(Screen.Campaigns.route, "Campaigns", Icons.Outlined.Campaign),
             BottomItem(Screen.Contacts.route,  "Contacts",  Icons.Outlined.PeopleAlt),
             BottomItem(Screen.Templates.route, "Templates", Icons.Outlined.Notes),
-            BottomItem(Screen.Sent.route,      "Sent",      Icons.Outlined.History)
+            BottomItem(Screen.Sent.route,      "Sent",      Icons.Outlined.History),
+            BottomItem(Screen.Account.route,   "Account",   Icons.Outlined.AccountCircle)
         )
         NavigationBar {
             items.forEach { item ->

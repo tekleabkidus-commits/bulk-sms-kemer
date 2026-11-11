@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Backoffice synchronization -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- SMS sending -->
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -64,6 +68,12 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- User-initiated remote gateway. dataSync has platform time limits. -->
+        <service android:name=".service.RemoteGatewayService"
+            android:exported="false" android:foregroundServiceType="dataSync" />
+        <receiver android:name=".service.GatewaySmsReceiver"
+            android:exported="false" />
 
         <!-- Boot recovery -->
         <receiver

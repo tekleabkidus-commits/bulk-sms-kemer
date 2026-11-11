@@ -159,6 +159,9 @@ class NewCampaignViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = s.copy(starting = true, errorText = null)
 
         return try {
+            // Avoid competing with the same SIM while the remote gateway is enabled.
+            if (bulksms.test.mark.remote.GatewayPrefs(getApplication()).enabled)
+                error("Stop the remote gateway from the Account tab before starting a local campaign")
             val template = s.selectedTemplateId?.let { a.templateRepo.getById(it) }
             val group = selectedGroup() ?: error("Group not selected")
             val sim = selectedSim() ?: error("SIM not selected")

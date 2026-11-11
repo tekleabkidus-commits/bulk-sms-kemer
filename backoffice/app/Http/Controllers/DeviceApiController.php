@@ -50,7 +50,7 @@ class DeviceApiController {
     public function receipt(Request $r) {
         $d=$r->attributes->get('gateway_device');
         $data=$r->validate(['id'=>'required|integer','lease_uuid'=>'required|uuid',
-            'status'=>'required|in:submitted,delivered,failed',
+            'status'=>'required|in:submitted,delivered,failed,unknown',
             'sms_result_code'=>'nullable|integer','error'=>'nullable|string|max:200']);
         $result=DB::transaction(function () use ($d,$data) {
             $row=DB::table('campaign_recipients as r')
@@ -60,8 +60,8 @@ class DeviceApiController {
                 ->select('r.id','r.status')->lockForUpdate()->first();
             if (!$row) return false;
             if ($row->status==='delivered') return true;
-            if ($row->status==='submitted' && $data['status']==='failed') return true;
-            if ($row->status==='failed' && $data['status']!=='delivered') return true;
+            if ($row->status==='submitted' && in_array($data['status'],['failed','unknown'])) return true;
+            if (in_array($row->status,['failed','unknown']) && in_array($data['status'],['failed','unknown'])) return true;
             if (!in_array($row->status,['leased','unknown','submitted','failed'])) return false;
             $update=['status'=>$data['status'],'sms_result_code'=>$data['sms_result_code']??null,
                 'error'=>$data['error']??null,'updated_at'=>now()];

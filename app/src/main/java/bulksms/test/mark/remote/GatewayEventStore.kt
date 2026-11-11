@@ -26,8 +26,10 @@ class GatewayEventStore(context: Context) {
         if(type=="sent" && !successful) {
             // Some multipart parts might have sent before a later part failed.
             val partial=v.optJSONArray("sent")?.length() ?: 0
-            v.put("status",if(partial>0)"unknown" else "failed")
-            v.put("error",if(partial>0)"Partial multipart failure" else "Modem send error")
+            // Multipart sends may be partially transmitted even if a callback fails.
+            val ambiguous=total>1 || partial>0
+            v.put("status",if(ambiguous)"unknown" else "failed")
+            v.put("error",if(ambiguous)"Possible partial multipart failure" else "Modem send error")
             v.put("code",code).put("dirty",true)
         } else if(successful) {
             val field=if(type=="delivered") "delivered" else "sent"
