@@ -13,6 +13,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/workspaces/switch',[Office::class,'switchWorkspace']);
     Route::post('/members',[Office::class,'addMember']);
     Route::post('/groups',[Office::class,'createGroup']);
+    Route::post('/contacts',[Office::class,'createContact']);
+    Route::post('/contacts/opt-out',[Office::class,'optOutByPhone']);
     Route::post('/groups/{id}/import',[Office::class,'importCsv']);
     Route::post('/contacts/{id}/opt-out',[Office::class,'optOut']);
     Route::post('/templates',[Office::class,'createTemplate']);

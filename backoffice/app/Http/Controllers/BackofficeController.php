@@ -46,9 +46,12 @@ class BackofficeController {
         $campaigns=DB::table('campaigns')->where('workspace_id',$w->id)->orderByDesc('id')->limit(50)->get();
         $counts=DB::table('campaign_recipients as r')->join('campaigns as c','c.id','=','r.campaign_id')
             ->where('c.workspace_id',$w->id)->selectRaw('r.status, COUNT(*) as total')->groupBy('r.status')->pluck('total','status');
+        $campaignStats=DB::table('campaign_recipients')->whereIn('campaign_id',$campaigns->pluck('id'))
+            ->selectRaw('campaign_id, status, COUNT(*) as total')->groupBy('campaign_id','status')
+            ->get()->groupBy('campaign_id');
         $members=DB::table('memberships')->join('users','users.id','=','memberships.user_id')
             ->where('workspace_id',$w->id)->get(['users.email','users.name','memberships.role']);
-        return view('dashboard',compact('w','workspaces','devices','groups','templates','campaigns','counts','members'));
+        return view('dashboard',compact('w','workspaces','devices','groups','templates','campaigns','campaignStats','counts','members'));
     }
     public function switchWorkspace(Request $r) {
         $data=$r->validate(['workspace_id'=>'required|integer']);
@@ -90,6 +93,45 @@ class BackofficeController {
         if (preg_match('/^251([79]\d{8})$/',$digits,$m)) return '+251'.$m[1];
         if (preg_match('/^([79]\d{8})$/',$digits,$m)) return '+251'.$m[1];
         return null;
+    }
+
+    public function createContact(Request $r) {
+        $w=Tenant::current(); Tenant::requireWrite($w);
+        $data=$r->validate(['group_id'=>'required|integer','phone'=>'required|string|max:32',
+            'name'=>'nullable|string|max:100','player_id'=>'nullable|string|max:100','consent'=>'accepted']);
+        abort_unless(DB::table('contact_groups')->where('workspace_id',$w->id)->where('id',$data['group_id'])->exists(),404);
+        $phone=$this->phone($data['phone']);
+        if (!$phone) return back()->withErrors(['phone'=>'Invalid Ethiopian mobile phone number.']);
+        $contact=DB::table('contacts')->where('workspace_id',$w->id)->where('phone',$phone)->first();
+        if ($contact && (!$contact->opted_in || $contact->opted_out_at))
+            return back()->withErrors(['phone'=>'This contact previously opted out. Do not add without separately recorded renewed consent.']);
+        $id=DB::transaction(function() use ($w,$data,$phone,$contact) {
+            if($contact) {
+                $id=$contact->id;
+                DB::table('contacts')->where('id',$id)->update([
+                    'name'=>$data['name']??$contact->name,'player_id'=>$data['player_id']??$contact->player_id,'updated_at'=>now()]);
+            } else {
+                $id=DB::table('contacts')->insertGetId([
+                    'workspace_id'=>$w->id,'phone'=>$phone,'name'=>$data['name']??null,
+                    'player_id'=>$data['player_id']??null,'opted_in'=>true,'created_at'=>now(),'updated_at'=>now()]);
+            }
+            DB::table('group_contacts')->insertOrIgnore(['group_id'=>$data['group_id'],'contact_id'=>$id]);
+            return $id;
+        });
+        Tenant::log($w,'contact.add',$id);
+        return back()->with('ok','Contact saved and added to group.');
+    }
+    public function optOutByPhone(Request $r) {
+        $w=Tenant::current(); Tenant::requireWrite($w);
+        $data=$r->validate(['phone'=>'required|string|max:32']);
+        $phone=$this->phone($data['phone']);
+        if (!$phone) return back()->withErrors(['phone'=>'Invalid Ethiopian phone.']);
+        $ct=DB::table('contacts')->where('workspace_id',$w->id)->where('phone',$phone)->first();
+        if (!$ct) return back()->withErrors(['phone'=>'Number not in this workspace.']);
+        DB::table('contacts')->where('id',$ct->id)->where('workspace_id',$w->id)
+            ->update(['opted_in'=>false,'opted_out_at'=>now(),'updated_at'=>now()]);
+        Tenant::log($w,'contact.opt_out',$ct->id);
+        return back()->with('ok','Recipient suppressed from future device claims.');
     }
     public function importCsv(Request $r, int $id) {
         $w=Tenant::current(); Tenant::requireWrite($w);

@@ -64,6 +64,18 @@ table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;
 <label class="checkbox"><input type="checkbox" name="consent" value="1" required><span class="hint">Confirm opt-in for uploaded contacts</span></label>
 <button class="secondary" type="submit">Import CSV</button></form></td></tr>
 @empty<tr><td colspan="2">Create your first group.</td></tr>@endforelse</tbody></table></div>
+<h3>Manually add a player</h3>
+<form method="post" action="/contacts">@csrf
+<label>Player group</label><select name="group_id" required><option value="">Choose group</option>@foreach($groups as $g)<option value="{{ $g->id }}">{{ $g->name }}</option>@endforeach</select>
+<label>Mobile phone</label><input name="phone" placeholder="0912345678" required>
+<label>Player name (optional)</label><input name="name" maxlength="100" placeholder="Name">
+<label>External player ID (optional)</label><input name="player_id" maxlength="100">
+<label class="checkbox"><input type="checkbox" name="consent" value="1" required><span>Player has explicitly agreed to receive these SMS messages</span></label>
+<button type="submit">Save player</button></form>
+<h3>Unsubscribe a player</h3>
+<form method="post" action="/contacts/opt-out">@csrf
+<label>Phone number to suppress</label><div class="inline"><input name="phone" placeholder="+2519XXXXXXXX" required><button class="danger">Opt out</button></div>
+</form>
 <p class="hint">CSV columns: phone, optional name. Ethiopian 09/07, 2519/2517, +2519/+2517 supported. Unsubscribed contacts cannot be re-added by importing.</p></section>
 <section class="panel" id="templates"><h2>SMS templates</h2>
 <form method="post" action="/templates">@csrf<label>Name</label><input name="name" maxlength="100" required placeholder="Account announcement">
@@ -79,12 +91,14 @@ table{width:100%;border-collapse:collapse;margin-top:12px}th,td{text-align:left;
 @empty<tr><td colspan="4">No linked phones.</td></tr>@endforelse</table></div></section>
 </div>
 <section class="panel" id="history"><h2>Campaign history</h2><p>Pause, resume and cancel take effect on new claims. Already-submitted SMS cannot be recalled.</p>
-<div class="tablewrap"><table><tr><th>ID</th><th>Campaign</th><th>Status</th><th>Created</th><th>Actions</th></tr>
-@forelse($campaigns as $c)<tr><td>#{{ $c->id }}</td><td>{{ $c->name }}</td><td><span class="tag">{{ $c->status }}</span></td><td>{{ $c->created_at }}</td>
+<div class="tablewrap"><table><tr><th>ID</th><th>Campaign</th><th>Status</th><th>Results</th><th>Created</th><th>Actions</th></tr>
+@forelse($campaigns as $c)<tr><td>#{{ $c->id }}</td><td>{{ $c->name }}</td><td><span class="tag">{{ $c->status }}</span></td>
+<td class="hint">@foreach(($campaignStats[$c->id]??collect()) as $s){{ $s->status }}: {{ $s->total }}<br>@endforeach</td>
+<td>{{ $c->created_at }}</td>
 <td class="mini">@if(in_array($w->role,['owner','admin','manager','operator']))
 @foreach(['pause','resume','cancel'] as $action)<form method="post" action="/campaigns/{{ $c->id }}/action">@csrf<input type="hidden" name="action" value="{{ $action }}"><button class="{{ $action==='cancel'?'danger':'secondary' }}">{{ ucfirst($action) }}</button></form>@endforeach
 @if(in_array($w->role,['owner','admin']))<form method="post" action="/campaigns/{{ $c->id }}/action">@csrf<input type="hidden" name="action" value="retry_failed"><button>Retry confirmed failures</button></form>@endif
-@endif</td></tr>@empty<tr><td colspan="5">No campaigns.</td></tr>@endforelse</table></div>
+@endif</td></tr>@empty<tr><td colspan="6">No campaigns.</td></tr>@endforelse</table></div>
 <a class="btn" href="/reports/export" style="display:inline-block;margin-top:13px;text-decoration:none">Download recipient report (CSV)</a></section>
 <section class="panel" id="accounts"><h2>Accounts & teams</h2><div class="panels">
 <div><h3>Create company</h3><form method="post" action="/workspaces">@csrf<label>Company name</label><input name="name" maxlength="100" required placeholder="Business name"><button>Create workspace</button></form>

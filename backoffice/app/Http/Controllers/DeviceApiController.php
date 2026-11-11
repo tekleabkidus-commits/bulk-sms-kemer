@@ -47,7 +47,18 @@ class DeviceApiController {
                 ->where('r.status','queued')
                 ->orderBy('c.id')->orderBy('r.id')
                 ->select('r.*')->lockForUpdate()->first();
-            if (!$row) return null;
+            if (!$row) {
+                // Transition exhausted campaigns out of RUNNING for dashboard accuracy.
+                $campaigns=DB::table('campaigns')->where('device_id',$d->id)
+                    ->where('workspace_id',$d->workspace_id)->where('status','running')->get(['id']);
+                foreach($campaigns as $campaign) {
+                    $outstanding=DB::table('campaign_recipients')->where('campaign_id',$campaign->id)
+                        ->whereIn('status',['queued','leased'])->exists();
+                    if(!$outstanding) DB::table('campaigns')->where('id',$campaign->id)
+                        ->update(['status'=>'completed','updated_at'=>now()]);
+                }
+                return null;
+            }
             $lease=(string) Str::uuid();
             $updated=DB::table('campaign_recipients')->where('id',$row->id)->where('status','queued')
                 ->update(['status'=>'leased','lease_uuid'=>$lease,'lease_expires_at'=>now()->addMinutes(3),
